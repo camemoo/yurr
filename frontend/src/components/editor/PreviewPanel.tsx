@@ -2,7 +2,12 @@
 
 import dynamic from "next/dynamic";
 import { useMemo } from "react";
-import { COMPOSITION_FPS, DEFAULT_DURATION_IN_FRAMES, cutBoundaries } from "@/components/VideoComposition";
+import {
+  COMPOSITION_FPS,
+  DEFAULT_CAPTION_STYLE,
+  DEFAULT_DURATION_IN_FRAMES,
+  cutBoundaries,
+} from "@/components/VideoComposition";
 import { formatDuration, interleaveBroll, useEditor } from "@/lib/editor-store";
 
 const PreviewPlayer = dynamic(() => import("@/components/PreviewPlayer"), {
@@ -13,7 +18,9 @@ const PreviewPlayer = dynamic(() => import("@/components/PreviewPlayer"), {
 const EMPTY: never[] = [];
 
 export function PreviewPanel() {
-  const { workspace, selectedSong, selectedClips } = useEditor();
+  const { activeProject, projectLyrics, selectedSong, selectedClips } = useEditor();
+  const beatsPerCut = activeProject?.beatsPerCut ?? 1;
+  const captionStyle = activeProject?.captionStyle ?? DEFAULT_CAPTION_STYLE;
 
   // Stable references: the Player only re-renders the composition when these
   // actually change, so typing in other tabs never disturbs playback.
@@ -27,7 +34,7 @@ export function PreviewPanel() {
 
   const synced = beats.length > 0 && brollClips.length > 0;
   const cutCount = synced
-    ? cutBoundaries(beats, workspace.beatsPerCut, durationInFrames, COMPOSITION_FPS).length - 1
+    ? cutBoundaries(beats, beatsPerCut, durationInFrames, COMPOSITION_FPS).length - 1
     : 0;
   const mode = !selectedSong
     ? { label: "No song", tone: "bg-zinc-800 text-zinc-400" }
@@ -47,15 +54,15 @@ export function PreviewPanel() {
             box stays exactly 9:16 instead of letterboxing inside the panel. */}
         <div className="aspect-[9/16] w-[min(100%,calc(65vh*0.5625))] overflow-hidden rounded-2xl bg-black shadow-2xl shadow-black/60 ring-1 ring-zinc-800 lg:w-[min(100%,calc((100vh-11rem)*0.5625))]">
           <PreviewPlayer
-            // A new song resets the playhead instead of keeping a position past its end.
-            key={selectedSong?.id ?? "none"}
+            // A new project or song resets the playhead instead of keeping a position past its end.
+            key={`${activeProject?.id}:${selectedSong?.id ?? "none"}`}
             durationInFrames={durationInFrames}
-            lyrics={workspace.transcribedLyrics}
+            lyrics={projectLyrics}
             words={words}
             beats={beats}
-            beatsPerCut={workspace.beatsPerCut}
+            beatsPerCut={beatsPerCut}
             brollClips={brollClips}
-            captionStyle={workspace.captionStyle}
+            captionStyle={captionStyle}
             audioSrc={selectedSong?.url ?? null}
             videoSrc={selectedClips[0]?.url ?? null}
           />

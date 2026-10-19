@@ -1,28 +1,43 @@
 "use client";
 
 import { useEditor } from "@/lib/editor-store";
-import { FilmIcon, MusicIcon, ScissorsIcon, WandIcon } from "./icons";
+import { FilmIcon, MusicIcon, ScissorsIcon, StockIcon, WandIcon } from "./icons";
 
-export type TabKey = "songs" | "clips" | "chopper" | "workspace";
+export type TabKey = "songs" | "clips" | "chopper" | "stock" | "workspace";
 
 export function Sidebar({ active, onChange }: { active: TabKey; onChange: (t: TabKey) => void }) {
-  const { songLibrary, clipLibrary, selectedSong, selectedClips, generating, chopperJobs, chopping } = useEditor();
+  const { songLibrary, clipLibrary, projects, generating, chopperJobs, chopping, stockDownloads } = useEditor();
+  const transcribing = songLibrary.some((s) => s.transcription.status === "running");
+  const stockDownloading = Object.values(stockDownloads).some((d) => d.status === "downloading");
 
   const tabs: { key: TabKey; label: string; icon: React.ReactNode; badge?: number; dot?: boolean }[] = [
-    { key: "songs", label: "Songs", icon: <MusicIcon className="size-5" />, badge: songLibrary.length },
+    {
+      key: "songs",
+      label: "Songs",
+      icon: <MusicIcon className="size-5" />,
+      badge: songLibrary.length,
+      dot: transcribing,
+    },
     { key: "clips", label: "Clips", icon: <FilmIcon className="size-5" />, badge: clipLibrary.length },
     {
       key: "chopper",
       label: "Video Chopper",
       icon: <ScissorsIcon className="size-5" />,
-      badge: chopperJobs.filter((j) => j.status === "pending").length,
+      // Waiting to run, or waiting for the user to pick clips.
+      badge: chopperJobs.filter((j) => j.status === "pending" || j.status === "review").length,
       dot: chopping,
+    },
+    {
+      key: "stock",
+      label: "Stock Footage",
+      icon: <StockIcon className="size-5" />,
+      dot: stockDownloading,
     },
     {
       key: "workspace",
       label: "Workspace",
       icon: <WandIcon className="size-5" />,
-      badge: (selectedSong ? 1 : 0) + selectedClips.length,
+      badge: projects.length,
       dot: generating,
     },
   ];

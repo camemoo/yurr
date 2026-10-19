@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   BEATS_PER_CUT_OPTIONS,
   CAPTION_ANIMATIONS,
@@ -13,7 +13,9 @@ import {
   AUDIO_EXTS,
   VIDEO_EXTS,
   formatDuration,
+  formatRelative,
   useEditor,
+  type Project,
   type TaskState,
 } from "@/lib/editor-store";
 import { ColorField, Select, Slider, StepSlider } from "./controls";
@@ -23,7 +25,9 @@ import {
   ChevronUpIcon,
   FilmIcon,
   MusicIcon,
+  PlusIcon,
   SpinnerIcon,
+  TrashIcon,
   TypeIcon,
   UploadIcon,
   WandIcon,
@@ -31,6 +35,121 @@ import {
 } from "./icons";
 import { PanelHeader } from "./PanelHeader";
 import type { TabKey } from "./Sidebar";
+
+export function WorkspaceTab({ onNavigate }: { onNavigate: (tab: TabKey) => void }) {
+  const { activeProject } = useEditor();
+  return activeProject ? (
+    <ProjectEditor key={activeProject.id} project={activeProject} onNavigate={onNavigate} />
+  ) : (
+    <ProjectsHome />
+  );
+}
+
+// ================================================================ projects home
+
+function ProjectCard({ project }: { project: Project }) {
+  const { songLibrary, clipLibrary, openProject, deleteProject } = useEditor();
+  const [confirming, setConfirming] = useState(false);
+  const song = songLibrary.find((s) => s.id === project.songId);
+  const clips = project.clipIds.map((id) => clipLibrary.find((c) => c.id === id)).filter((c) => !!c);
+  const cover = clips[0];
+  const synced = !!song?.beats && clips.length > 0 && clips.every((c) => c.broll);
+
+  // A delete confirmation that quietly expires.
+  useEffect(() => {
+    if (!confirming) return;
+    const t = setTimeout(() => setConfirming(false), 3000);
+    return () => clearTimeout(t);
+  }, [confirming]);
+
+  return (
+    <li className="group relative overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/50 transition hover:border-zinc-600 animate-fade-in">
+      <button type="button" onClick={() => openProject(project.id)} className="block w-full text-left">
+        <div className="relative aspect-[4/3] overflow-hidden bg-gradient-to-br from-violet-900/40 via-zinc-900 to-fuchsia-900/30">
+          {cover ? (
+            <video
+              src={`${cover.url}#t=${(cover.broll?.[0]?.centerOffset ?? 0.5).toFixed(2)}`}
+              muted
+              preload="metadata"
+              className="size-full object-cover opacity-80 transition group-hover:opacity-100"
+            />
+          ) : (
+            <div className="flex size-full items-center justify-center text-zinc-700">
+              <FilmIcon className="size-10" />
+            </div>
+          )}
+          <span
+            className={`absolute left-3 top-3 rounded-full px-2 py-0.5 text-[11px] font-medium backdrop-blur ${
+              synced ? "bg-emerald-500/20 text-emerald-200" : "bg-black/50 text-zinc-300"
+            }`}
+          >
+            {synced ? "Beat-synced" : "Draft"}
+          </span>
+        </div>
+        <div className="p-4">
+          <p className="truncate font-medium text-zinc-100">{project.name}</p>
+          <p className="mt-1 flex items-center gap-1.5 truncate text-xs text-zinc-500">
+            <MusicIcon className="size-3.5 shrink-0" />
+            <span className="truncate">{song?.name ?? "No song yet"}</span>
+          </p>
+          <p className="mt-2 text-xs text-zinc-500">
+            {clips.length} clip{clips.length === 1 ? "" : "s"} · edited {formatRelative(project.updatedAt)}
+          </p>
+        </div>
+      </button>
+      <button
+        type="button"
+        onClick={() => (confirming ? deleteProject(project.id) : setConfirming(true))}
+        aria-label={confirming ? `Confirm delete ${project.name}` : `Delete ${project.name}`}
+        className={`absolute right-3 top-3 flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium backdrop-blur transition focus:opacity-100 ${
+          confirming
+            ? "bg-red-600 text-white opacity-100"
+            : "bg-black/50 text-zinc-300 opacity-0 hover:text-red-300 group-hover:opacity-100"
+        }`}
+      >
+        <TrashIcon className="size-3.5" />
+        {confirming && "Delete?"}
+      </button>
+    </li>
+  );
+}
+
+function ProjectsHome() {
+  const { projects, createProject } = useEditor();
+  return (
+    <div className="flex flex-col gap-6">
+      <PanelHeader
+        title="Projects"
+        subtitle="Each project is one edit: a song, its clips, lyrics and style."
+        count={projects.length}
+      />
+      <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        <li>
+          <button
+            type="button"
+            onClick={() => createProject()}
+            className="flex size-full min-h-64 flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed border-zinc-800 bg-zinc-900/30 text-zinc-400 transition hover:border-violet-500/60 hover:bg-violet-500/5 hover:text-zinc-100"
+          >
+            <span className="flex size-12 items-center justify-center rounded-full bg-gradient-to-br from-violet-600 to-fuchsia-600 text-white shadow-lg shadow-violet-900/40">
+              <PlusIcon className="size-6" />
+            </span>
+            <span className="text-sm font-semibold">Create New Project</span>
+          </button>
+        </li>
+        {projects.map((p) => (
+          <ProjectCard key={p.id} project={p} />
+        ))}
+      </ul>
+      {projects.length === 0 && (
+        <p className="text-sm text-zinc-500">
+          Tip: &ldquo;New Project&rdquo; on any song or clip in your libraries starts a project with it.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ================================================================ project editor
 
 function Section(props: { title: string; aside?: React.ReactNode; children: React.ReactNode }) {
   return (
@@ -44,7 +163,7 @@ function Section(props: { title: string; aside?: React.ReactNode; children: Reac
   );
 }
 
-/** Small "upload here" button: adds files to the library *and* to the workspace. */
+/** Small "upload here" button: adds files to the library *and* to the project. */
 function MiniUpload(props: { label: string; accept: string; multiple?: boolean; onFiles: (files: File[]) => void }) {
   const ref = useRef<HTMLInputElement>(null);
   return (
@@ -97,7 +216,7 @@ function TaskRow({ label, task }: { label: string; task: TaskState }) {
     cached: <CheckIcon className="size-4 text-zinc-500" />,
     error: <XIcon className="size-4 text-red-400" />,
   }[task.status];
-  const message = task.status === "cached" ? "already analyzed" : task.message;
+  const message = task.status === "cached" ? "already done" : task.message;
   return (
     <li className="flex items-start gap-2.5 text-sm animate-fade-in">
       <span className="mt-0.5 shrink-0">{icon}</span>
@@ -114,31 +233,38 @@ function TaskRow({ label, task }: { label: string; task: TaskState }) {
 const iconBtn =
   "rounded p-1 text-zinc-500 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-30 disabled:hover:bg-transparent";
 
-export function WorkspaceTab({ onNavigate }: { onNavigate: (tab: TabKey) => void }) {
+function ProjectEditor({ project, onNavigate }: { project: Project; onNavigate: (tab: TabKey) => void }) {
   const {
-    workspace,
     selectedSong,
     selectedClips,
+    projectLyrics,
     tasks,
     generating,
     addFiles,
-    sendSongToWorkspace,
-    addClipsToWorkspace,
-    clearSong,
-    removeClipFromWorkspace,
+    openProject,
+    renameProject,
+    deleteProject,
+    setProjectSong,
+    addClipsToProject,
+    clearProjectSong,
+    removeClipFromProject,
     moveClip,
-    setLyrics,
+    setProjectLyrics,
+    resetProjectLyrics,
     setCaptionStyle,
     setBeatsPerCut,
     generateMagicCut,
+    retryTranscription,
   } = useEditor();
-  const style = workspace.captionStyle;
+  const style = project.captionStyle;
+  const transcription = selectedSong?.transcription.status;
+  const transcribing = transcription === "queued" || transcription === "running";
 
   const canGenerate = !!selectedSong && selectedClips.length > 0 && !generating;
   const allCached =
-    !!selectedSong?.beats && !!selectedSong?.transcript && selectedClips.every((c) => c.broll);
+    !!selectedSong?.beats && transcription === "done" && selectedClips.every((c) => c.broll);
 
-  // Only tasks for what's in the workspace now, in workspace order.
+  // Only tasks for what's in the project now, in project order.
   const taskEntries: [string, string, TaskState][] = [];
   if (selectedSong) {
     for (const [k, label] of [["beats", "Analyze beats"], ["lyrics", "Transcribe lyrics"]] as const) {
@@ -158,7 +284,37 @@ export function WorkspaceTab({ onNavigate }: { onNavigate: (tab: TabKey) => void
 
   return (
     <div className="flex flex-col gap-8">
-      <PanelHeader title="Workspace" subtitle="Your active edit. The preview reflects exactly what's here." />
+      {/* ------------------------------------------------ project header */}
+      <header className="flex flex-col gap-3">
+        <button
+          type="button"
+          onClick={() => openProject(null)}
+          className="self-start text-xs font-medium text-zinc-500 transition hover:text-zinc-200"
+        >
+          ← All projects
+        </button>
+        <div className="flex items-center gap-3">
+          <input
+            aria-label="Project name"
+            value={project.name}
+            onChange={(e) => renameProject(project.id, e.target.value)}
+            onBlur={(e) => !e.target.value.trim() && renameProject(project.id, "Untitled project")}
+            className="min-w-0 flex-1 rounded-lg border border-transparent bg-transparent px-2 py-1 -ml-2 text-xl font-semibold tracking-tight text-zinc-50 outline-none transition hover:border-zinc-800 focus:border-violet-500"
+          />
+          <button
+            type="button"
+            onClick={() => deleteProject(project.id)}
+            aria-label="Delete project"
+            title="Delete project"
+            className="rounded-lg p-2 text-zinc-600 transition hover:bg-zinc-800 hover:text-red-400"
+          >
+            <TrashIcon className="size-4" />
+          </button>
+        </div>
+        <p className="-mt-2 text-sm text-zinc-500">
+          Edited {formatRelative(project.updatedAt)}. The preview reflects exactly what&apos;s here.
+        </p>
+      </header>
 
       {/* ------------------------------------------------ song */}
       <Section
@@ -168,8 +324,9 @@ export function WorkspaceTab({ onNavigate }: { onNavigate: (tab: TabKey) => void
             label={selectedSong ? "Replace" : "Upload song"}
             accept={`audio/*,${AUDIO_EXTS.join(",")}`}
             onFiles={(files) => {
-              const [id] = addFiles(files.slice(0, 1), "song");
-              if (id) sendSongToWorkspace(id);
+              // Jump the queue: this song is being edited right now.
+              const [id] = addFiles(files.slice(0, 1), "song", { priority: true });
+              if (id) setProjectSong(id);
             }}
           />
         }
@@ -185,6 +342,12 @@ export function WorkspaceTab({ onNavigate }: { onNavigate: (tab: TabKey) => void
                 {formatDuration(selectedSong.beats?.duration ?? selectedSong.duration)}
                 {selectedSong.beats &&
                   ` · ${Math.round(selectedSong.beats.tempo)} BPM · ${selectedSong.beats.beats.length} beats`}
+                {transcribing && (
+                  <span className="text-violet-300">
+                    {" "}
+                    · {transcription === "running" ? "transcribing lyrics…" : "lyrics queued"}
+                  </span>
+                )}
               </p>
             </div>
             <button
@@ -194,14 +357,14 @@ export function WorkspaceTab({ onNavigate }: { onNavigate: (tab: TabKey) => void
             >
               Library
             </button>
-            <button type="button" onClick={clearSong} aria-label="Remove song from workspace" className={iconBtn}>
+            <button type="button" onClick={clearProjectSong} aria-label="Remove song from project" className={iconBtn}>
               <XIcon className="size-4" />
             </button>
           </div>
         ) : (
           <EmptySlot
             icon={<MusicIcon className="size-5" />}
-            text="No song selected. The song's beat drives every cut."
+            text="No song yet. The song's beat drives every cut, and its checked lyrics come with it."
             action="Pick from library"
             onClick={() => onNavigate("songs")}
           />
@@ -226,7 +389,7 @@ export function WorkspaceTab({ onNavigate }: { onNavigate: (tab: TabKey) => void
               label="Upload clips"
               accept={`video/*,${VIDEO_EXTS.join(",")}`}
               multiple
-              onFiles={(files) => addClipsToWorkspace(addFiles(files, "clip"))}
+              onFiles={(files) => addClipsToProject(addFiles(files, "clip"))}
             />
           </>
         }
@@ -271,8 +434,8 @@ export function WorkspaceTab({ onNavigate }: { onNavigate: (tab: TabKey) => void
                   </button>
                   <button
                     type="button"
-                    onClick={() => removeClipFromWorkspace(clip.id)}
-                    aria-label={`Remove ${clip.name} from workspace`}
+                    onClick={() => removeClipFromProject(clip.id)}
+                    aria-label={`Remove ${clip.name} from project`}
                     className={`ml-1 ${iconBtn} hover:text-red-400`}
                   >
                     <XIcon className="size-4" />
@@ -297,7 +460,7 @@ export function WorkspaceTab({ onNavigate }: { onNavigate: (tab: TabKey) => void
           <StepSlider
             label="Beats per Cut"
             options={BEATS_PER_CUT_OPTIONS}
-            value={workspace.beatsPerCut}
+            value={project.beatsPerCut}
             onChange={setBeatsPerCut}
             format={fmtBeats}
           />
@@ -308,10 +471,10 @@ export function WorkspaceTab({ onNavigate }: { onNavigate: (tab: TabKey) => void
             className="flex items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-violet-600 to-fuchsia-600 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-900/30 transition hover:brightness-110 disabled:cursor-not-allowed disabled:from-zinc-800 disabled:to-zinc-800 disabled:text-zinc-500 disabled:shadow-none"
           >
             {generating ? <SpinnerIcon className="size-4" /> : <WandIcon className="size-4" />}
-            {generating ? "Generating…" : allCached && selectedSong ? "Magic Cut is up to date" : "Generate Magic Cut"}
+            {generating ? "Generating…" : allCached ? "Magic Cut is up to date" : "Generate Magic Cut"}
           </button>
           {!selectedSong || selectedClips.length === 0 ? (
-            <p className="text-center text-xs text-zinc-500">Select a song and at least one clip to generate.</p>
+            <p className="text-center text-xs text-zinc-500">Add a song and at least one clip to generate.</p>
           ) : (
             taskEntries.length > 0 && (
               <ul className="flex flex-col gap-1.5">
@@ -326,7 +489,7 @@ export function WorkspaceTab({ onNavigate }: { onNavigate: (tab: TabKey) => void
 
       {/* ------------------------------------------------ lyrics */}
       <Section
-        title="Editable Lyrics"
+        title="Lyrics"
         aside={
           selectedSong?.transcript && (
             <span className="text-xs text-zinc-500">{selectedSong.transcript.words.length} timed words</span>
@@ -335,18 +498,43 @@ export function WorkspaceTab({ onNavigate }: { onNavigate: (tab: TabKey) => void
       >
         <textarea
           id="lyrics"
-          value={workspace.transcribedLyrics}
-          onChange={(e) => setLyrics(e.target.value)}
+          value={projectLyrics}
+          onChange={(e) => setProjectLyrics(e.target.value)}
           placeholder={
-            selectedSong ? "Generate a Magic Cut to transcribe lyrics, or type them here…" : "Select a song first…"
+            !selectedSong
+              ? "Add a song first. Its checked lyrics load here automatically…"
+              : transcribing
+                ? "Transcribing… the lyrics will appear here in a moment."
+                : "No lyrics. Type them here…"
           }
           rows={6}
           className="min-h-36 resize-y rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 font-mono text-sm leading-relaxed text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-violet-500 focus:ring-2 focus:ring-violet-500/20"
         />
-        {selectedSong?.transcript && (
-          <p className="text-xs text-zinc-500">
-            Edits keep their timing: unchanged words stay synced, new or corrected words fill the gap around them.
-          </p>
+        {selectedSong && (
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-500">
+            {project.lyricsOverride === null ? (
+              <span>
+                {selectedSong.lyricsEdited ? "Checked lyrics" : "Lyrics"} from the library
+                {selectedSong.transcript ? ". Edits here keep their timing." : "."}
+              </span>
+            ) : (
+              <span className="flex items-center gap-2">
+                Edited for this project only.
+                <button type="button" onClick={resetProjectLyrics} className="font-medium text-violet-400 hover:text-violet-300">
+                  Reset to library lyrics
+                </button>
+              </span>
+            )}
+            {transcription === "error" && (
+              <button
+                type="button"
+                onClick={() => retryTranscription(selectedSong.id)}
+                className="font-medium text-red-400 hover:text-red-300"
+              >
+                Transcription failed. Retry
+              </button>
+            )}
+          </div>
         )}
       </Section>
 

@@ -7,19 +7,41 @@ Docs:
 """
 
 import gc
+import json
+import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
+
+
+def _load_dotenv(path: Path):
+    """Minimal KEY=VALUE loader for backend/.env (gitignored); real env vars win."""
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+
+
+_load_dotenv(Path(__file__).resolve().parent / ".env")
 
 BASE_DIR = Path(__file__).resolve().parent
 STORAGE_DIR = BASE_DIR / "storage"
@@ -38,7 +60,10 @@ WHISPER_TIERS = [
 # --- B-roll tuning ---
 DEFAULT_CLIP_LENGTH = "5-7"   # seconds: fixed ("6") or a range ("5-7")
 MAX_CLIP_LENGTH = 30.0
-NUM_CLIPS = 5
+# No fixed clip count: every moment that clears VALID_PROMINENCE is returned.
+# HARD_MAX_CLIPS only guards against a runaway encode on very long footage.
+VALID_PROMINENCE = 0.5
+HARD_MAX_CLIPS = 200
 ANALYSIS_FPS = 5.0          # frames per second actually analysed
 ANALYSIS_WIDTH = 480        # downscale before differencing / face detection
 FACE_WEIGHT = 1.0           # score bonus for a frame containing a frontal face
@@ -277,13 +302,19 @@ def parse_clip_length(value: str) -> tuple[float, float]:
 ACTIVE_FRACTION = 0.35
 
 
-def pick_moments(times, motion, faces, duration, n=NUM_CLIPS, length_range=(5.0, 7.0)):
-    """Combine motion + faces into one score, then pick the n strongest moments.
+def pick_moments(times, motion, faces, duration, max_clips=None, length_range=(5.0, 7.0)):
+    """Combine motion + faces into one score and return every *valid* moment.
+
+    A peak is valid when it stands out from the video's baseline (median)
+    activity by at least VALID_PROMINENCE of the video's strongest activity
+    (98th percentile), so a static stretch never becomes a clip and steady
+    footage isn't tiled into dozens of near-identical cuts. Peaks are taken
+    strongest-first; clips never overlap; `max_clips` (default: no limit beyond
+    HARD_MAX_CLIPS) caps the count.
 
     Each clip's length adapts to how long the action lasts: the active span
     around the peak, clamped to `length_range`, and the clip is centred on that
-    span (or on the peak itself, if the action runs longer than the max length).
-    Clips never overlap unless the video is too short to fit n of them."""
+    span (or on the peak itself, if the action runs longer than the max length)."""
     if len(times) == 0:
         return []
     lo, hi = min(length_range[0], duration), min(length_range[1], duration)
@@ -319,31 +350,26 @@ def pick_moments(times, motion, faces, duration, n=NUM_CLIPS, length_range=(5.0,
     def overlap(a, b):
         return max(0.0, min(a[1], b[1]) - max(a[0], b[0]))
 
-    order = np.argsort(smooth)[::-1]
+    limit = min(max_clips or HARD_MAX_CLIPS, HARD_MAX_CLIPS)
+    min_score = baseline + VALID_PROMINENCE * (float(np.percentile(smooth, 98)) - baseline)
     chosen = []
-    # Pass 1: no overlap at all. Pass 2 (short videos only): allow clips to share
-    # up to half their length so we still return n distinct moments.
-    for max_shared in (0.0, 0.5):
-        for i in order:
-            if len(chosen) == n:
-                break
-            start, end, span = window_for(i)
-            if any(overlap((start, end), (c["start"], c["end"])) > max_shared * min(end - start, c["end"] - c["start"]) + 1e-6
-                   for c in chosen):
-                continue
-            reason = "face" if faces[i] > 0 and motion_n[i] < 0.5 else (
-                "motion+face" if faces[i] > 0 else "motion")
-            chosen.append({
-                "start": round(start, 3),
-                "end": round(end, 3),
-                "center": round(float(np.clip(times[i], start, end)), 3),  # the peak itself
-                "length": round(end - start, 3),
-                "active_span": round(float(span), 2),
-                "score": round(float(smooth[i]), 3),
-                "reason": reason,
-            })
-        if len(chosen) == n:
-            break
+    for i in np.argsort(smooth)[::-1]:
+        if len(chosen) >= limit or smooth[i] <= baseline or smooth[i] < min_score:
+            break  # sorted strongest-first: everything after this is weaker
+        start, end, span = window_for(i)
+        if any(overlap((start, end), (c["start"], c["end"])) > 1e-6 for c in chosen):
+            continue
+        reason = "face" if faces[i] > 0 and motion_n[i] < 0.5 else (
+            "motion+face" if faces[i] > 0 else "motion")
+        chosen.append({
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "center": round(float(np.clip(times[i], start, end)), 3),  # the peak itself
+            "length": round(end - start, 3),
+            "active_span": round(float(span), 2),
+            "score": round(float(smooth[i]), 3),
+            "reason": reason,
+        })
     return sorted(chosen, key=lambda c: c["start"])
 
 
@@ -430,6 +456,11 @@ def extract_broll(
         description="Clip length in seconds: fixed ('6') or a range ('5-7'). With a range, "
                     "each clip's length follows how long the action lasts.",
     ),
+    max_clips: int = Form(
+        0,
+        ge=0,
+        description=f"Optional cap on the number of clips; 0 = every valid moment (up to {HARD_MAX_CLIPS}).",
+    ),
 ):
     try:
         length_range = parse_clip_length(target_clip_length)
@@ -448,7 +479,7 @@ def extract_broll(
         video_path.unlink(missing_ok=True)
         raise HTTPException(status_code=422, detail=f"Video is {duration:.1f}s; need at least 1s.")
 
-    moments = pick_moments(times, motion, faces, duration, length_range=length_range)
+    moments = pick_moments(times, motion, faces, duration, max_clips=max_clips or None, length_range=length_range)
     clips = cut_clips(video_path, moments, BROLL_DIR / job_id)
 
     return {
@@ -460,7 +491,173 @@ def extract_broll(
     }
 
 
+_CLIP_NAME = re.compile(r"^clip_\d+\.mp4$")
+
+
+@app.post("/api/broll/{job_id}/discard")
+def discard_broll(job_id: str, files: list[str] = Body(..., embed=True)):
+    """Delete extracted clips the user didn't keep (e.g. unselected in the review grid)."""
+    if not re.fullmatch(r"[0-9a-f]{12}", job_id):
+        raise HTTPException(status_code=404, detail="Unknown job")
+    job_dir = BROLL_DIR / job_id
+    removed = []
+    for name in files:
+        if not _CLIP_NAME.match(name):  # no paths, no traversal: only clip_N.mp4
+            raise HTTPException(status_code=422, detail=f"Invalid clip name: {name}")
+        target = job_dir / name
+        if target.is_file():
+            target.unlink()
+            removed.append(name)
+    if job_dir.is_dir() and not any(job_dir.iterdir()):
+        job_dir.rmdir()
+    return {"removed": removed}
+
+
+# ---------------------------------------------------------------- stock footage (Pixabay)
+# Proxied through the backend so the API key never reaches the browser bundle,
+# and so video downloads don't depend on the CDN sending CORS headers.
+
+PIXABAY_API_BASE = os.environ.get("PIXABAY_API_BASE", "https://pixabay.com/api")
+# Pixabay's API terms ask clients to cache search results for 24 hours.
+_SEARCH_CACHE_SECONDS = 24 * 3600
+_search_cache: dict[tuple, tuple[float, dict]] = {}
+
+
+def _pixabay_key() -> str:
+    key = os.environ.get("PIXABAY_API_KEY", "").strip()
+    if not key:
+        raise HTTPException(
+            status_code=503,
+            detail="Stock footage needs a Pixabay API key. Get a free one at https://pixabay.com/api/docs/ "
+                   "(log in, it's shown under 'Parameters'), add PIXABAY_API_KEY=... to backend/.env, "
+                   "then restart the backend.",
+        )
+    return key
+
+
+def _pixabay_get(params: dict) -> dict:
+    cache_key = tuple(sorted(params.items()))
+    hit = _search_cache.get(cache_key)
+    if hit and time.time() - hit[0] < _SEARCH_CACHE_SECONDS:
+        return hit[1]
+    url = f"{PIXABAY_API_BASE}/videos/?{urllib.parse.urlencode({'key': _pixabay_key(), **params})}"
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "Flowstage/1.0"}),
+                                    timeout=20) as r:
+            data = json.load(r)
+    except urllib.error.HTTPError as e:
+        # Pixabay answers a bad key with 400 '"key" is wrong or missing' (never echo the URL: it has the key).
+        body = e.read().decode(errors="replace")
+        if e.code in (400, 401, 403) and "key" in body.lower():
+            raise HTTPException(status_code=502, detail="Pixabay rejected the API key. Check PIXABAY_API_KEY in backend/.env.")
+        if e.code == 429:
+            raise HTTPException(status_code=429, detail="Pixabay rate limit reached (100 requests/minute). Try again shortly.")
+        raise HTTPException(status_code=502, detail=f"Pixabay error {e.code}")
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise HTTPException(status_code=502, detail=f"Can't reach Pixabay: {getattr(e, 'reason', e)}")
+    _search_cache[cache_key] = (time.time(), data)
+    return data
+
+
+def _renditions(videos: dict) -> list[dict]:
+    """Pixabay's large/medium/small/tiny renditions that actually exist
+    (missing ones come back with an empty url and size 0)."""
+    out = []
+    for name in ("large", "medium", "small", "tiny"):
+        r = (videos or {}).get(name) or {}
+        if r.get("url") and r.get("width") and r.get("height"):
+            out.append({**r, "name": name})
+    return out
+
+
+def _thumbnail(hit: dict, renditions: list[dict]) -> str | None:
+    """A frame from the video. Current API: each rendition carries a `thumbnail`.
+    Older responses: build it from `picture_id`. (`userImageURL` is the
+    uploader's avatar, not a video frame, so it's only used for the credit.)"""
+    for name in ("medium", "small", "large", "tiny"):
+        thumb = ((hit.get("videos") or {}).get(name) or {}).get("thumbnail")
+        if thumb:
+            return thumb
+    if hit.get("picture_id"):
+        return f"https://i.vimeocdn.com/video/{hit['picture_id']}_640x360.jpg"
+    return None
+
+
+@app.get("/api/stock/search")
+def stock_search(
+    query: str = Query(..., min_length=1, max_length=100),
+    page: int = Query(1, ge=1, le=100),
+    per_page: int = Query(18, ge=3, le=50),
+):
+    data = _pixabay_get({"q": query, "page": page, "per_page": per_page, "safesearch": "true"})
+
+    results = []
+    for hit in data.get("hits", []):
+        rends = _renditions(hit.get("videos"))
+        if not rends:
+            continue
+        long_side = lambda r: max(r["width"], r["height"])  # noqa: E731
+        # Download: the biggest rendition that's at most 1080p. That's `large` for
+        # HD uploads, but for 4K uploads Pixabay's large is 3840 and medium 2560,
+        # so it's `small` (1920). If nothing fits, take the smallest available.
+        fits = [r for r in rends if long_side(r) <= 1920]
+        download = max(fits, key=long_side) if fits else min(rends, key=long_side)
+        preview = min(rends, key=long_side)  # smallest file for hover previews
+        _STOCK_FILES[hit["id"]] = download["url"]
+        user, user_id = hit.get("user"), hit.get("user_id")
+        results.append({
+            "id": hit["id"],
+            "width": download["width"],
+            "height": download["height"],
+            "duration": hit.get("duration"),
+            "image": _thumbnail(hit, rends),
+            "preview_url": preview["url"],
+            "download": {"width": download["width"], "height": download["height"], "quality": download["name"]},
+            "tags": hit.get("tags", ""),
+            "author": user,
+            "author_url": f"https://pixabay.com/users/{user}-{user_id}/" if user and user_id else None,
+            "author_avatar": hit.get("userImageURL") or None,
+            "page_url": hit.get("pageURL"),
+        })
+    total = data.get("totalHits", 0)  # how many the API will actually page through (max 500)
+    return {
+        "query": query,
+        "page": page,
+        "total_results": total,
+        "has_more": page * per_page < total,
+        "videos": results,
+    }
+
+
+# id -> download URL, filled by searches: downloads only fetch URLs Pixabay gave
+# us (never an arbitrary URL from the client).
+_STOCK_FILES: dict[int, str] = {}
+
+
+@app.get("/api/stock/download/{video_id}")
+def stock_download(video_id: int):
+    url = _STOCK_FILES.get(video_id)
+    if not url:
+        raise HTTPException(status_code=404, detail="Search for this video again before downloading it.")
+    try:
+        upstream = urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "Flowstage/1.0"}),
+                                          timeout=30)
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise HTTPException(status_code=502, detail=f"Download from Pixabay failed: {getattr(e, 'reason', e)}")
+
+    def stream():
+        with upstream:
+            while chunk := upstream.read(1 << 16):
+                yield chunk
+
+    headers = {"Content-Disposition": f'attachment; filename="pixabay-{video_id}.mp4"'}
+    if upstream.headers.get("Content-Length"):
+        headers["Content-Length"] = upstream.headers["Content-Length"]  # lets the UI show progress
+    return StreamingResponse(stream(), media_type="video/mp4", headers=headers)
+
+
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host="127.0.0.1", port=8000)
+    # Code and .env are read once at startup: restart this after changing either.
+    uvicorn.run("main:app", host="127.0.0.1", port=int(os.environ.get("PORT", "8000")))

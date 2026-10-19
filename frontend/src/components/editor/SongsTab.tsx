@@ -1,15 +1,47 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { AUDIO_EXTS, formatBytes, formatDuration, useEditor } from "@/lib/editor-store";
+import { AUDIO_EXTS, formatBytes, formatDuration, useEditor, type SongItem } from "@/lib/editor-store";
 import { DropZone } from "./DropZone";
-import { CheckIcon, MusicIcon, PauseIcon, PlayIcon, TrashIcon } from "./icons";
+import { CheckIcon, MusicIcon, PauseIcon, PlayIcon, PlusIcon, SpinnerIcon, TrashIcon, TypeIcon } from "./icons";
+import { LyricsDialog } from "./LyricsDialog";
 import { PanelHeader } from "./PanelHeader";
 
+function LyricsStatus({ song, onRetry }: { song: SongItem; onRetry: () => void }) {
+  const t = song.transcription;
+  if (t.status === "queued") return <span className="text-zinc-500">Lyrics queued</span>;
+  if (t.status === "running")
+    return (
+      <span className="flex items-center gap-1 text-violet-300">
+        <SpinnerIcon className="size-3" /> Transcribing lyrics…
+      </span>
+    );
+  if (t.status === "error")
+    return (
+      <span className="flex items-center gap-2 text-red-400" title={t.error}>
+        {song.lyricsEdited ? "Lyrics typed manually" : "Transcription failed"}
+        <button type="button" onClick={onRetry} className="font-medium text-zinc-300 underline-offset-2 hover:underline">
+          Retry
+        </button>
+      </span>
+    );
+  const words = song.transcript?.words.length ?? 0;
+  return (
+    <span className="flex items-center gap-1 text-emerald-400">
+      <CheckIcon className="size-3" />
+      {words ? `Lyrics · ${words} words` : "No vocals detected"}
+      {song.lyricsEdited && <span className="text-zinc-400">· checked</span>}
+    </span>
+  );
+}
+
 export function SongsTab() {
-  const { songLibrary, workspace, addFiles, removeSong, sendSongToWorkspace } = useEditor();
+  const { songLibrary, activeProject, addFiles, removeSong, setProjectSong, setSongLyrics, retryTranscription } =
+    useEditor();
   const audioRef = useRef<HTMLAudioElement>(null);
   const [playingId, setPlayingId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const editing = songLibrary.find((s) => s.id === editingId);
 
   // Stop previewing a song that's been removed.
   useEffect(() => {
@@ -34,13 +66,13 @@ export function SongsTab() {
     <div className="flex flex-col gap-6">
       <PanelHeader
         title="Songs"
-        subtitle="Master tracks. Send one to the workspace to cut to its beat."
+        subtitle="Master tracks. Lyrics are transcribed on upload. Check them here before you start a project."
         count={songLibrary.length}
       />
 
       <DropZone
         title="Drag & drop master tracks"
-        hint="WAV, MP3, M4A, FLAC — or click to browse"
+        hint="WAV, MP3, M4A, FLAC — lyrics are transcribed automatically"
         accept={`audio/*,${AUDIO_EXTS.join(",")}`}
         onFiles={(files) => addFiles(files, "song").length}
         compact={songLibrary.length > 0}
@@ -49,13 +81,14 @@ export function SongsTab() {
       {songLibrary.length > 0 && (
         <ul className="flex flex-col gap-2">
           {songLibrary.map((song) => {
-            const inWorkspace = workspace.selectedSongId === song.id;
+            const inProject = activeProject?.songId === song.id;
             const playing = playingId === song.id;
+            const busy = song.transcription.status === "queued" || song.transcription.status === "running";
             return (
               <li
                 key={song.id}
                 className={`group flex items-center gap-4 rounded-xl border p-3 pr-4 transition-colors animate-fade-in ${
-                  inWorkspace
+                  inProject
                     ? "border-violet-500/50 bg-violet-500/5"
                     : "border-zinc-800 bg-zinc-900/50 hover:border-zinc-700"
                 }`}
@@ -83,29 +116,42 @@ export function SongsTab() {
                         {Math.round(song.beats.tempo)} BPM
                       </span>
                     )}
-                    {song.transcript && (
-                      <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-300">Lyrics</span>
-                    )}
+                    <LyricsStatus song={song} onRetry={() => retryTranscription(song.id)} />
                   </div>
+                  {song.lyrics && (
+                    <p className="mt-1.5 truncate text-xs italic text-zinc-400">“{song.lyrics}”</p>
+                  )}
                 </div>
 
                 <button
                   type="button"
-                  onClick={() => sendSongToWorkspace(song.id)}
-                  disabled={inWorkspace}
+                  onClick={() => setEditingId(song.id)}
+                  disabled={busy}
+                  title={busy ? "Available once transcription finishes" : undefined}
+                  className="flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-700 hover:bg-zinc-800/60 hover:text-white disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+                >
+                  <TypeIcon className="size-3.5" />
+                  Edit Lyrics
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setProjectSong(song.id)}
+                  disabled={inProject}
+                  title={
+                    inProject
+                      ? undefined
+                      : activeProject
+                        ? `Use in ${activeProject.name}`
+                        : "Creates a new project with this song"
+                  }
                   className={`flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-                    inWorkspace
+                    inProject
                       ? "cursor-default bg-violet-500/15 text-violet-300"
                       : "bg-violet-600 text-white hover:bg-violet-500"
                   }`}
                 >
-                  {inWorkspace ? (
-                    <>
-                      <CheckIcon className="size-3.5" /> In Workspace
-                    </>
-                  ) : (
-                    "Send to Workspace"
-                  )}
+                  {inProject ? <CheckIcon className="size-3.5" /> : <PlusIcon className="size-3.5" />}
+                  {inProject ? "In Project" : activeProject ? "Use in Project" : "New Project"}
                 </button>
                 <button
                   type="button"
@@ -119,6 +165,15 @@ export function SongsTab() {
             );
           })}
         </ul>
+      )}
+
+      {editing && (
+        <LyricsDialog
+          key={editing.id}
+          song={editing}
+          onSave={(lyrics) => setSongLyrics(editing.id, lyrics)}
+          onClose={() => setEditingId(null)}
+        />
       )}
 
       <audio ref={audioRef} onPause={() => setPlayingId(null)} onEnded={() => setPlayingId(null)} hidden />

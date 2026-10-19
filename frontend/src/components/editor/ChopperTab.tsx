@@ -8,6 +8,7 @@ import {
   useEditor,
   type ChopperJob,
 } from "@/lib/editor-store";
+import { ChopperReviewDialog } from "./ChopperReviewDialog";
 import { RangeSlider } from "./controls";
 import { DropZone } from "./DropZone";
 import { CheckIcon, PlusIcon, ScissorsIcon, SpinnerIcon, XIcon } from "./icons";
@@ -27,12 +28,12 @@ function useNow(active: boolean) {
   return now;
 }
 
-function JobRow({ job, now }: { job: ChopperJob; now: number }) {
-  const { clipLibrary, removeChopperJob, addClipsToWorkspace, workspace } = useEditor();
+function JobRow({ job, now, onReview }: { job: ChopperJob; now: number; onReview: () => void }) {
+  const { clipLibrary, removeChopperJob, addClipsToProject, activeProject } = useEditor();
   const clips = (job.clipIds ?? [])
     .map((id) => clipLibrary.find((c) => c.id === id))
     .filter((c) => !!c);
-  const allAdded = clips.length > 0 && clips.every((c) => workspace.selectedClipIds.includes(c.id));
+  const allAdded = clips.length > 0 && !!activeProject && clips.every((c) => activeProject.clipIds.includes(c.id));
 
   const status = {
     pending: <span className="text-zinc-500">Queued</span>,
@@ -42,6 +43,7 @@ function JobRow({ job, now }: { job: ChopperJob; now: number }) {
         Scanning & cutting… {job.startedAt ? `${Math.round((now - job.startedAt) / 1000)}s` : ""}
       </span>
     ),
+    review: <span className="text-amber-300">{job.message}, waiting for your pick</span>,
     done: (
       <span className="flex items-center gap-1 text-emerald-400">
         <CheckIcon className="size-3.5" /> {job.message}
@@ -66,15 +68,25 @@ function JobRow({ job, now }: { job: ChopperJob; now: number }) {
         {job.status === "done" && clips.length > 0 && (
           <button
             type="button"
-            onClick={() => addClipsToWorkspace(clips.map((c) => c.id))}
+            onClick={() => addClipsToProject(clips.map((c) => c.id))}
             disabled={allAdded}
             className="flex shrink-0 items-center gap-1 rounded-lg bg-violet-600 px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-violet-500 disabled:bg-violet-500/15 disabled:text-violet-300"
           >
             {allAdded ? <CheckIcon className="size-3.5" /> : <PlusIcon className="size-3.5" />}
-            {allAdded ? "In Workspace" : "Add all to Workspace"}
+            {allAdded ? "In Project" : activeProject ? "Add all to Project" : "New Project from clips"}
           </button>
         )}
-        {job.status !== "processing" && (
+        {job.status === "review" && (
+          <button
+            type="button"
+            onClick={onReview}
+            className="shrink-0 rounded-lg bg-amber-500/90 px-3 py-1.5 text-xs font-semibold text-zinc-950 transition hover:bg-amber-400"
+          >
+            Review {job.candidates?.length} clips
+          </button>
+        )}
+        {/* A job under review owns cut files on the server; it's settled through the modal. */}
+        {job.status !== "processing" && job.status !== "review" && (
           <button
             type="button"
             onClick={() => removeChopperJob(job.id)}
@@ -111,11 +123,26 @@ function JobRow({ job, now }: { job: ChopperJob; now: number }) {
 }
 
 export function ChopperTab({ onNavigate }: { onNavigate: (tab: TabKey) => void }) {
-  const { chopperJobs, chopping, addChopperFiles, processChopperQueue, clipLengthRange, setClipLengthRange } =
-    useEditor();
+  const {
+    chopperJobs,
+    chopping,
+    addChopperFiles,
+    processChopperQueue,
+    clipLengthRange,
+    setClipLengthRange,
+    saveChopperSelection,
+    setChopperReviewDismissed,
+  } = useEditor();
   const now = useNow(chopping);
   const waiting = chopperJobs.filter((j) => j.status === "pending" || j.status === "error").length;
   const produced = chopperJobs.reduce((n, j) => n + (j.clipIds?.length ?? 0), 0);
+
+  // The review modal opens by itself for each newly chopped video (unless the
+  // user chose "review later"), or on demand from a job's "Review" button.
+  const [manualReviewId, setManualReviewId] = useState<string | null>(null);
+  const reviewJob =
+    chopperJobs.find((j) => j.id === manualReviewId && j.status === "review") ??
+    chopperJobs.find((j) => j.status === "review" && !j.reviewDismissed);
 
   return (
     <div className="flex flex-col gap-6">
@@ -139,7 +166,7 @@ export function ChopperTab({ onNavigate }: { onNavigate: (tab: TabKey) => void }
         <div className="flex flex-col gap-4">
           <DropZone
             title="Drag & drop long raw videos"
-            hint="MP4, MOV, WEBM — each one is scanned for its 5 best moments"
+            hint="MP4, MOV, WEBM — every moment of action or faces gets cut, then you pick the keepers"
             accept={`video/*,${VIDEO_EXTS.join(",")}`}
             onFiles={addChopperFiles}
             compact={chopperJobs.length > 0}
@@ -147,7 +174,7 @@ export function ChopperTab({ onNavigate }: { onNavigate: (tab: TabKey) => void }
           {chopperJobs.length > 0 && (
             <ul className="flex flex-col gap-3">
               {chopperJobs.map((job) => (
-                <JobRow key={job.id} job={job} now={now} />
+                <JobRow key={job.id} job={job} now={now} onReview={() => setManualReviewId(job.id)} />
               ))}
             </ul>
           )}
@@ -180,10 +207,25 @@ export function ChopperTab({ onNavigate }: { onNavigate: (tab: TabKey) => void }
           <p className="text-center text-xs text-zinc-500">
             {waiting === 0 && !chopping
               ? "Add a video to get started."
-              : "Clips land in your Clips library as each video finishes."}
+              : "When a video finishes you'll pick which clips go to your library."}
           </p>
         </aside>
       </div>
+
+      {reviewJob && (
+        <ChopperReviewDialog
+          key={reviewJob.id}
+          job={reviewJob}
+          onSave={(keep) => {
+            saveChopperSelection(reviewJob.id, keep);
+            setManualReviewId(null);
+          }}
+          onLater={() => {
+            setChopperReviewDismissed(reviewJob.id, true);
+            setManualReviewId(null);
+          }}
+        />
+      )}
     </div>
   );
 }

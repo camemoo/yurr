@@ -107,7 +107,29 @@ export const TypeIcon = (p: IconProps) => (
   </Svg>
 );
 
-export const SpinnerIcon =({ className = "", ...p }: IconProps) => (
+export const SearchIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="11" cy="11" r="7" />
+    <path d="m20 20-3.5-3.5" />
+  </Svg>
+);
+
+export const StockIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="3" y="5" width="18" height="14" rx="2" />
+    <path d="m10 9 5 3-5 3z" fill="currentColor" />
+    <path d="M7 2.5h10" />
+  </Svg>
+);
+
+export const DownloadIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 4v12m0 0-4-4m4 4 4-4" />
+    <path d="M4 18v1a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-1" />
+  </Svg>
+);
+
+export const SpinnerIcon = ({ className = "", ...p }: IconProps) => (
   <Svg className={`animate-spin ${className}`} {...p}>
     <path d="M12 3a9 9 0 1 0 9 9" />
   </Svg>
