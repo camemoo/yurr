@@ -1,0 +1,20 @@
+# Dependencies & build output
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+backend/venv/
+**/__pycache__/
+
+# Runtime data: uploads and extracted B-roll
+backend/storage/
+
+# Media files (raw uploads / exports): keep big binaries out of the repo
+*.mp4
+*.wav
+*.mp3
+*.mov
+# ...except the small placeholder clip the editor ships with
+!frontend/public/placeholder.mp4
+
+# Secrets / local config
+.env*
